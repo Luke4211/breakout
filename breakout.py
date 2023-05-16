@@ -15,6 +15,7 @@ from tensorflow.keras.callbacks import Callback
 import sys
 from collections import deque
 import os
+from pympler import asizeof
 
 from gymnasium.wrappers import AtariPreprocessing
 
@@ -69,27 +70,29 @@ class DQNAgent:
         #state: a list of frames
         if len(self.memory) > self.replay_memory_size:
             self.memory.popleft()
-        stacked_state = np.array(self.state_buffer)
+        stacked_state = np.array(state)
         
 
         self.memory.append((stacked_state, action, reward, next_state, done))
-        #self.state_buffer.popleft()
+        #print(f'Size of memory entry: {asizeof.asizeof(self.memory.pop())}')
+        #print(f'type of next_state: {type(next_state[0][0][0])}')
+        #print(f'type of stacked_state: {type(stacked_state[0][0][0])}')
 
     def act(self, state):
         #print(f'state buffer: {self.state_buffer.shape}')
-        self.state_buffer = state
+        #self.state_buffer = state
         if (np.random.rand() <= self.epsilon):
             return random.randrange(self.action_space)
-        act_values = self.model.predict(np.expand_dims(self.state_buffer, axis=0),verbose=0)
+        act_values = self.model.predict(np.expand_dims(state, axis=0),verbose=0)
 
         return np.argmax(act_values[0])  # returns action
     
 
 
     def replay(self, batch_size):
-        if len(self.state_buffer) < self.frame_stack_size:
+        '''if len(self.state_buffer) < self.frame_stack_size:
             #print(f'state_buffer: {len(self.state_buffer)}')
-            return
+            return'''
         minibatch = random.sample(self.memory, batch_size)
         actual_batch_size = len(minibatch)
 
@@ -137,7 +140,7 @@ if train_play:
     # Initialize gym environment and the agent
     env = gym.make('BreakoutNoFrameskip-v4')
     
-    env = AtariPreprocessing(env, noop_max=10, scale_obs=True )
+    env = AtariPreprocessing(env, noop_max=10 )
     print(env.observation_space)
     agent = DQNAgent(env.observation_space.shape, env.action_space.n)
 
@@ -167,10 +170,11 @@ if train_play:
 
             # Advance the game to the next frame based on the action.
             next_state, reward, done, trunc, info  = env.step(action)
-
+            
             total_score += reward
 
             next_state = np.concatenate( (state[..., 1:], np.expand_dims(next_state, -1) ), axis=-1)
+
 
             # Remember the previous state, action, reward, and done
             agent.remember(state, action, reward, next_state, done)
