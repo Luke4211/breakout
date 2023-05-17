@@ -1,28 +1,22 @@
-import gymnasium as gym
 import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, Flatten
+from tensorflow import keras
+from keras.models import Sequential
+from keras.layers import Dense, Flatten
 
 # from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.optimizers import RMSprop
+from keras.optimizers import RMSprop
 import numpy as np
 import random
 import signal
 import gc
-from tensorflow.keras import backend as k
-from tensorflow.keras.layers import Conv2D
+from keras import backend as k
+from keras.layers import Conv2D
 import sys
 from collections import deque
 import os
 
-# from pympler import asizeof
 import pickle
-from gymnasium.wrappers import AtariPreprocessing, RecordEpisodeStatistics
 import psutil
-
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
-# tf.logging.set_verbosity(tf.logging.INFO)
-# export TF_CPP_MIN_LOG_LEVEL="3"
 
 
 class DQNAgent:
@@ -81,7 +75,6 @@ class DQNAgent:
         self.target_model.set_weights(self.model.get_weights())
 
     def remember(self, state, action, reward, next_state, done):
-        # state: a list of frames
         if len(self.memory) > self.replay_memory_size:
             self.memory.popleft()
         stacked_state = np.array(state)
@@ -92,24 +85,21 @@ class DQNAgent:
         # print(f'type of stacked_state: {type(stacked_state[0][0][0])}')
 
     def act(self, state):
-        # print(f'state buffer: {self.state_buffer.shape}')
-        # self.state_buffer = state
         if np.random.rand() <= self.epsilon:
             return random.randrange(self.action_space)
         act_values = self.model.predict(np.expand_dims(state, axis=0), verbose=0)
 
         return np.argmax(act_values[0])  # returns action
 
-    def replay(self, batch_size):
-        if len(self.memory) < batch_size:
+    def replay(self):
+        if len(self.memory) < self.batch_size:
             return
-        minibatch = random.sample(self.memory, batch_size)
+        minibatch = random.sample(self.memory, self.batch_size)
         actual_batch_size = len(minibatch)
 
         states = np.array([i[0] for i in minibatch])
         actions = np.array([i[1] for i in minibatch])
         rewards = np.array([i[2] for i in minibatch])
-        # next_states_unstacked = np.array([i[3] for i in minibatch])
         next_states = np.array([i[3] for i in minibatch])
         dones = np.array([i[4] for i in minibatch])
 
@@ -137,151 +127,109 @@ class DQNAgent:
         sys.exit(0)
 
 
-process = psutil.Process()
+class TrainAgent:
+    def __init__(self, env, agent, num_eps=1500, max_ep_steps=5000, save_rate=100):
+        self.env = env
+        self.agent = agent
+        self.num_eps = num_eps
+        self.max_ep_steps = max_ep_steps
+        self.save_rate = save_rate
+        self.process = psutil.Process()
+        self.mem_data = []
 
+        def handler(signal, frame):
+            self.sigint_handler(signal, frame)
 
-def get_memory(proc):
-    memory_info = proc.memory_info()
-    memory_usage_mb = memory_info.rss / (1024**2)
-    return memory_usage_mb
+        signal.signal(signal.SIGINT, handler)
 
+    def get_memory(self):
+        memory_info = self.process.memory_info()
+        memory_usage_mb = memory_info.rss / (1024**2)
+        return memory_usage_mb
 
-mem_data = []
+    def sigint_handler(self, signal, frame):
+        with open("mem_usage.pkl", "wb") as f:
+            pickle.dump(self.mem_data, f)
+        self.agent.handle_interrupt()
 
-# 1 for train, 0 for play
-train_play = 1
+    def train(self):
+        total_score: float
+        total_steps = 0
+        for e in range(self.max_ep_steps):
+            # reset state in the beginning of each game
+            state, info = self.env.reset()
+            state = np.stack(
+                [state] * self.agent.frame_stack_size, axis=-1
+            )  # initialize the state with the same frame repeated
 
+            if (e > 0) and (e % self.save_rate == 0):
+                self.agent.save(f"benchmark_{e}.h5")
+                with open(f"{e}_rewards.pkl", "wb") as f:
+                    pickle.dump(list(self.env.return_queue), f)
 
-def sigint_handler(signal, frame):
-    with open(f"mem_usage.pkl", "wb") as f:
-        pickle.dump(mem_data, f)
-    agent.handle_interrupt()
+            total_score = 0.0
+            # time ticks
+            for time in range(5000):
+                # Decide action
+                action = self.agent.act(state)
 
+                # Advance the game to the next frame based on the action.
+                next_state, reward, done, trunc, info = self.env.step(action)
 
-if train_play:
-    # Initialize gym environment and the agent
-    env = gym.make("BreakoutNoFrameskip-v4")
+                total_score += reward
 
-    env = AtariPreprocessing(env, noop_max=10)
-    env = RecordEpisodeStatistics(env)
-    print(env.observation_space)
-    agent = DQNAgent(env.observation_space.shape, env.action_space.n)
-
-    signal.signal(signal.SIGINT, sigint_handler)
-
-    # Iterate the game
-    prev_frame = None
-    num_eps = 1500
-    save_rate = 100
-    total_score: float
-    total_steps = 0
-    for e in range(num_eps):
-        # reset state in the beginning of each game
-        state, info = env.reset()
-        state = np.stack(
-            [state] * agent.frame_stack_size, axis=-1
-        )  # initialize the state with the same frame repeated
-
-        if (e > 0) and (e % save_rate == 0):
-            agent.save(f"benchmark_{e}.h5")
-            with open(f"{e}_rewards.pkl", "wb") as f:
-                pickle.dump(list(env.return_queue), f)
-
-        total_score = 0.0
-        # time ticks
-        for time in range(5000):
-            # Decide action
-            action = agent.act(state)
-
-            # Advance the game to the next frame based on the action.
-            next_state, reward, done, trunc, info = env.step(action)
-
-            total_score += reward
-
-            next_state = np.concatenate(
-                (state[..., 1:], np.expand_dims(next_state, -1)), axis=-1
-            )
-
-            # Remember the previous state, action, reward, and done
-            agent.remember(state, action, reward, next_state, done)
-
-            # make next_state the new current state for the next frame.
-            state = next_state
-
-            if done:
-                # print the score and break out of the loop
-                print(
-                    "episode: {}/{}, score: {}, num_steps: {}".format(
-                        e, num_eps, total_score, total_steps + time
-                    )
+                next_state = np.concatenate(
+                    (state[..., 1:], np.expand_dims(next_state, -1)), axis=-1
                 )
-                break
 
-            # train the agent with the experience of the episode
-            agent.replay(32)
+                # Remember the previous state, action, reward, and done
+                self.agent.remember(state, action, reward, next_state, done)
 
-        # update target model weights every episode
-        agent.update_target_model()
-        total_steps += time
-        # print(f'Size of memory entry: {asizeof.asizeof(agent.memory)}')
-        print(f"mem: {get_memory(process)}")
-        mem_data.append((total_steps, get_memory(process)))
-        k.clear_session()
-        gc.collect()
-    # Save the model after training
-    agent.save("dqn_model_bigly.h5")
-    with open(f"mem_usage.pkl", "wb") as f:
-        pickle.dump(mem_data, f)
+                # make next_state the new current state for the next frame.
+                state = next_state
 
-else:
-    # Initialize gym environment and the agent
-    env = gym.make("BreakoutNoFrameskip-v4", render_mode="human")
-    env = AtariPreprocessing(env, noop_max=10)
-    agent = DQNAgent(env.observation_space.shape, env.action_space.n)
+                if done:
+                    # print the score and break out of the loop
+                    print(
+                        "episode: {}/{}, score: {}, num_steps: {}".format(
+                            e, self.num_eps, total_score, total_steps + time
+                        )
+                    )
+                    break
 
-    agent.load("benchmark_100.h5")
-    agent.frame_stack_size = 4
-    agent.epsilon = 0.1
+                # train the agent with the experience of the episode
+                self.agent.replay()
 
-    # print(f'LOOK OBERSVATION SPACE: {env.observation_space.shape}')
-    # Iterate the game
+            # update target model weights every episode
+            self.agent.update_target_model()
+            total_steps += time
+            # print(f'Size of memory entry: {asizeof.asizeof(agent.memory)}')
+            print(f"mem: {self.get_memory(self.process)}")
+            self.mem_data.append((total_steps, self.get_memory(self.process)))
+            k.clear_session()
+            gc.collect()
+        # Save the model after training
+        self.agent.save("dqn_model_bigly.h5")
+        with open("mem_usage.pkl", "wb") as f:
+            pickle.dump(self.mem_data, f)
 
-    num_eps = 10
-    for e in range(num_eps):
-        # reset state in the beginning of each game
-        state, info = env.reset()
-        state = np.stack([state] * agent.frame_stack_size, axis=-1)
-        # print(f'THIS IS THE STATE: {state}')
-        # state = np.reshape(state, [1, *state.shape])
+    def play_model(self):
+        for e in range(self.num_eps):
+            state, info = self.env.reset()
+            state = np.stack([state] * self.agent.frame_stack_size, axis=-1)
 
-        # time ticks
-        for time in range(5000):
-            # turn this on if you want to render
-            env.render()
+            for time in range(self.max_ep_steps):
+                self.env.render()
 
-            # Decide action
-            action = agent.act(state)
+                action = self.agent.act(state)
 
-            # Advance the game to the next frame based on the action.
-            # print(f'THIS IS THE ACTION: {env.step(action)}')
-            next_state, reward, done, trunc, info = env.step(action)
-            # print(f'LOOK NEXT STATE: {next_state.shape}')
+                next_state, _, done, _, _ = self.env.step(action)
 
-            next_state = np.concatenate(
-                (state[..., 1:], np.expand_dims(next_state, -1)), axis=-1
-            )
+                next_state = np.concatenate(
+                    (state[..., 1:], np.expand_dims(next_state, -1)), axis=-1
+                )
 
-            # Remember the previous state, action, reward, and done
-            # next_state = np.reshape(next_state, [1, *next_state.shape])
-            # print(f'LOOK NEXT STATE RESHAPED: {next_state.shape}')
-            # agent.remember(state, action, reward, next_state, done)
+                state = next_state
 
-            # make next_state the new current state for the next frame.
-            state = next_state
-
-            # done becomes True when the game ends
-            # ex) The agent drops the pole
-            if done:
-                # print the score and break out of the loop
-                print("episode: {}/{}, score: {}".format(e, num_eps, time))
-                break
+                if done:
+                    break
