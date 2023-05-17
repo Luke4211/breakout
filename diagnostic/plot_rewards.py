@@ -2,13 +2,16 @@ import pickle
 import numpy as np
 import matplotlib.pyplot as plt
 
-num_files = 5
+num_files = 1
 window_size = 15
-model_name = "alpha"
+model_name = "beta"
 
 data_list = []
 
-file_names = [f"models/{model_name}/{i*100}_rewards.pkl" for i in range(1, num_files)]
+file_names = [
+    f"models/{model_name}/{i*100}_rewards.pkl" for i in range(1, num_files + 1)
+]
+print(file_names)
 # Load and unpickle the array
 
 for file in file_names:
@@ -32,4 +35,4 @@ plt.plot(smoothed, "r-")
 plt.title("Cumulative Rewards")
 plt.xlabel("Episode")
 plt.ylabel("Value")
-plt.show()
+plt.savefig(f"models/{model_name}/reward_chart.png")

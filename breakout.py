@@ -16,7 +16,6 @@ import sys
 from collections import deque
 import os
 
-# import os
 
 import pickle
 import psutil
@@ -29,21 +28,35 @@ class DQNAgent:
         action_space,
         replay_memory_size=50000,
         frame_stack_size=4,
-        epsilon_lin=False,
         gamma=0.98,
         epsilon=1.0,
         epsilon_min=0.1,
         epsilon_decay=0.999,
         batch_size=32,
-        model_name="beta",  # just a name to store models files under
+        model_name="beta",
         decay_func=lambda x, y: x * y,
     ):
+        """_summary_
+
+        Args:
+            state_shape: Shape of the env states
+            action_space: number of legal actions in the environment
+            y (x): _description_
+            replay_memory_size (int, optional): Size of the experience buffer
+            frame_stack_size (int, optional): Number of frames to stack together for temporal info
+            gamma (float, optional): Discount factor for future rewards
+            epsilon (float, optional): Probability to select random action
+            epsilon_min (float, optional): Minimum epsilon value
+            epsilon_decay (float, optional): Value to decay epsilon by per step
+            batch_size (int, optional): Number of experiences to train on
+            model_name (str, optional): Name of the directory to store files in
+            decay_func (function: float): Function describing how epsilon decays
+        """
         self.state_shape = state_shape
         self.action_space = action_space
         self.memory = deque(maxlen=replay_memory_size)
         self.replay_memory_size = replay_memory_size
         self.frame_stack_size = frame_stack_size
-        self.epsilon_lin = epsilon_lin
         self.gamma = gamma  # discount factor
         self.epsilon = epsilon  # exploration rate
         self.epsilon_min = epsilon_min
@@ -211,7 +224,6 @@ class TrainAgent:
 
             # update target model weights every episode
             if e % self.update_freq == 0:
-                print("Updating")
                 self.agent.update_target_model()
 
             total_steps += time
