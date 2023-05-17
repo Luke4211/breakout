@@ -1,5 +1,6 @@
 import tensorflow as tf
-from tensorflow import keras
+
+# from tensorflow import keras
 from keras.models import Sequential
 from keras.layers import Dense, Flatten
 
@@ -14,6 +15,8 @@ from keras.layers import Conv2D
 import sys
 from collections import deque
 import os
+
+# import os
 
 import pickle
 import psutil
@@ -32,6 +35,7 @@ class DQNAgent:
         epsilon_min=0.1,
         epsilon_decay=0.999,
         batch_size=32,
+        model_name="beta",  # just a name to store models files under
         decay_func=lambda x, y: x * y,
     ):
         self.state_shape = state_shape
@@ -45,10 +49,12 @@ class DQNAgent:
         self.epsilon_min = epsilon_min
         self.epsilon_decay = epsilon_decay
         self.batch_size = batch_size
+        self.model_name = model_name
         self.decay_func = decay_func
         self.model = self.build_model()
         self.target_model = self.build_model()
         self.update_target_model()
+        os.makedirs(f"models/{self.model_name}")
 
     def build_model(self):
         model = Sequential()
@@ -116,24 +122,26 @@ class DQNAgent:
         self.epsilon = self.decay_func(self.epsilon, self.epsilon_decay)
 
     def save(self, name):
-        self.model.save(name)
+        self.model.save(f"models/{self.model_name}/{name}")
 
     def load(self, name):
-        self.model = tf.keras.models.load_model(name)
+        self.model = tf.keras.models.load_model(f"models/{self.model_name}/{name}")
 
     def handle_interrupt(self):
         print("Interrupted, saving...")
         self.save("interrupted_model.h5")
-        sys.exit(0)
 
 
 class TrainAgent:
-    def __init__(self, env, agent, num_eps=1500, max_ep_steps=5000, save_rate=100):
+    def __init__(
+        self, env, agent, num_eps=1500, max_ep_steps=5000, save_rate=100, update_freq=3
+    ):
         self.env = env
         self.agent = agent
         self.num_eps = num_eps
         self.max_ep_steps = max_ep_steps
         self.save_rate = save_rate
+        self.update_freq = update_freq
         self.process = psutil.Process()
         self.mem_data = []
 
@@ -148,9 +156,10 @@ class TrainAgent:
         return memory_usage_mb
 
     def sigint_handler(self, signal, frame):
-        with open("mem_usage.pkl", "wb") as f:
+        with open(f"models/{self.agent.model_name}/mem_usage.pkl", "wb") as f:
             pickle.dump(self.mem_data, f)
         self.agent.handle_interrupt()
+        sys.exit(0)
 
     def train(self):
         total_score: float
@@ -164,7 +173,7 @@ class TrainAgent:
 
             if (e > 0) and (e % self.save_rate == 0):
                 self.agent.save(f"benchmark_{e}.h5")
-                with open(f"{e}_rewards.pkl", "wb") as f:
+                with open(f"models/{self.agent.model_name}/{e}_rewards.pkl", "wb") as f:
                     pickle.dump(list(self.env.return_queue), f)
 
             total_score = 0.0
@@ -201,16 +210,19 @@ class TrainAgent:
                 self.agent.replay()
 
             # update target model weights every episode
-            self.agent.update_target_model()
+            if e % self.update_freq == 0:
+                print("Updating")
+                self.agent.update_target_model()
+
             total_steps += time
             # print(f'Size of memory entry: {asizeof.asizeof(agent.memory)}')
-            print(f"mem: {self.get_memory(self.process)}")
-            self.mem_data.append((total_steps, self.get_memory(self.process)))
+            print(f"mem: {self.get_memory()}")
+            self.mem_data.append((total_steps, self.get_memory()))
             k.clear_session()
             gc.collect()
         # Save the model after training
-        self.agent.save("dqn_model_bigly.h5")
-        with open("mem_usage.pkl", "wb") as f:
+        self.agent.save(f"models/{self.agent.model_name}/final_model.h5")
+        with open(f"models/{self.agent.model_name}/final_mem_usage.pkl", "wb") as f:
             pickle.dump(self.mem_data, f)
 
     def play_model(self):
