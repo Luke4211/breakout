@@ -20,7 +20,7 @@ classroom = TrainAgent(env, agent)
 
 # classroom.train()
 
-agent.load("benchmark_500.h5")
+agent.load("benchmark.h5")
 agent.epsilon = 0.1
 agent.update_target_model()
 

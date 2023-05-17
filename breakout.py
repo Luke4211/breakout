@@ -67,7 +67,7 @@ class DQNAgent:
         self.model = self.build_model()
         self.target_model = self.build_model()
         self.update_target_model()
-        os.makedirs(f"models/{self.model_name}")
+        os.makedirs(f"models/{self.model_name}", exist_ok=True)
 
     def build_model(self):
         model = Sequential()
@@ -132,7 +132,8 @@ class DQNAgent:
 
         self.model.fit(states, targets_full, epochs=1, verbose=0)
 
-        self.epsilon = self.decay_func(self.epsilon, self.epsilon_decay)
+        if self.epsilon > self.epsilon_min:
+            self.epsilon = self.decay_func(self.epsilon, self.epsilon_decay)
 
     def save(self, name):
         self.model.save(f"models/{self.model_name}/{name}")
@@ -210,7 +211,7 @@ class TrainAgent:
                 # make next_state the new current state for the next frame.
                 state = next_state
 
-                if done:
+                if done or trunc:
                     # print the score and break out of the loop
                     print(
                         "episode: {}/{}, score: {}, num_steps: {}".format(

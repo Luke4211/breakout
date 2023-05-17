@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 
 num_files = 1
 window_size = 15
-model_name = "beta"
+model_name = "charlie"
 
 data_list = []
 
