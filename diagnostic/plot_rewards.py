@@ -2,16 +2,15 @@ import pickle
 import numpy as np
 import matplotlib.pyplot as plt
 
-num_files = 1
-window_size = 15
-model_name = "charlie"
+num_files = 6
+window_size = 50
+model_name = "foxtrot"
 
 data_list = []
 
 file_names = [
     f"models/{model_name}/{i*100}_rewards.pkl" for i in range(1, num_files + 1)
 ]
-print(file_names)
 # Load and unpickle the array
 
 for file in file_names:
@@ -24,7 +23,7 @@ data_list = data_list.reshape((len(file_names) * 100, 1))
 
 plt.figure()
 
-plt.plot(np.ravel(data_list), "b-", alpha=0.5)
+# plt.plot(np.ravel(data_list), "b-", alpha=0.5)
 
 
 smoothed = np.convolve(

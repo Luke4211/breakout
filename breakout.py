@@ -106,6 +106,7 @@ class DQNAgent:
     def act(self, state):
         if np.random.rand() <= self.epsilon:
             return random.randrange(self.action_space)
+        state = state.astype("float32") / 255.0
         act_values = self.model.predict(np.expand_dims(state, axis=0), verbose=0)
 
         return np.argmax(act_values[0])  # returns action
@@ -116,10 +117,10 @@ class DQNAgent:
         minibatch = random.sample(self.memory, self.batch_size)
         actual_batch_size = len(minibatch)
 
-        states = np.array([i[0] for i in minibatch])
+        states = np.array([i[0] for i in minibatch]).astype("float32") / 255.0
         actions = np.array([i[1] for i in minibatch])
         rewards = np.array([i[2] for i in minibatch])
-        next_states = np.array([i[3] for i in minibatch])
+        next_states = np.array([i[3] for i in minibatch]).astype("float32") / 255.0
         dones = np.array([i[4] for i in minibatch])
 
         targets = rewards + self.gamma * (
@@ -211,7 +212,7 @@ class TrainAgent:
                 # make next_state the new current state for the next frame.
                 state = next_state
 
-                if done or trunc:
+                if done:
                     # print the score and break out of the loop
                     print(
                         "episode: {}/{}, score: {}, num_steps: {}".format(
@@ -223,9 +224,9 @@ class TrainAgent:
                 # train the agent with the experience of the episode
                 self.agent.replay()
 
-            # update target model weights every episode
-            if e % self.update_freq == 0:
-                self.agent.update_target_model()
+                # update target model weights every episode
+                if (total_steps + time) % self.update_freq == 0:
+                    self.agent.update_target_model()
 
             total_steps += time
             # print(f'Size of memory entry: {asizeof.asizeof(agent.memory)}')
