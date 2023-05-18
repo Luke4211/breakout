@@ -41,7 +41,6 @@ class DQNAgent:
         Args:
             state_shape: Shape of the env states
             action_space: number of legal actions in the environment
-            y (x): _description_
             replay_memory_size (int, optional): Size of the experience buffer
             frame_stack_size (int, optional): Number of frames to stack together for temporal info
             gamma (float, optional): Discount factor for future rewards

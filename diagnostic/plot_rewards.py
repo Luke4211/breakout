@@ -2,9 +2,9 @@ import pickle
 import numpy as np
 import matplotlib.pyplot as plt
 
-num_files = 6
+num_files = 13
 window_size = 50
-model_name = "foxtrot"
+model_name = "golf"
 
 data_list = []
 

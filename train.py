@@ -9,6 +9,7 @@ from config import (
     EPSILON_DECAY,
     GAMMA,
     EPSILON_MIN,
+    NUM_EPS,
 )
 
 env = gym.make("BreakoutNoFrameskip-v4")
@@ -27,6 +28,8 @@ agent = DQNAgent(
     model_name=MODEL_NAME,
 )
 
-classroom = TrainAgent(env, agent, save_rate=SAVE_RATE, update_freq=UPDATE_FREQ)
+classroom = TrainAgent(
+    env, agent, num_eps=NUM_EPS, save_rate=SAVE_RATE, update_freq=UPDATE_FREQ
+)
 
 classroom.train()
