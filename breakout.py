@@ -141,6 +141,10 @@ class DQNAgent:
     def load(self, name):
         self.model = tf.keras.models.load_model(f"models/{self.model_name}/{name}")
 
+    def load_other(self, name):
+        self.model = tf.keras.models.load_model(f"models/{name}")
+        print("loaded")
+
     def handle_interrupt(self):
         print("Interrupted, saving...")
         self.save("interrupted_model.h5")
@@ -148,7 +152,14 @@ class DQNAgent:
 
 class TrainAgent:
     def __init__(
-        self, env, agent, num_eps=1500, max_ep_steps=5000, save_rate=100, update_freq=3
+        self,
+        env,
+        agent,
+        num_eps=1500,
+        max_ep_steps=5000,
+        save_rate=100,
+        update_freq=3,
+        neg_reward=-0.5,
     ):
         self.env = env
         self.agent = agent
@@ -158,6 +169,7 @@ class TrainAgent:
         self.update_freq = update_freq
         self.process = psutil.Process()
         self.mem_data = []
+        self.neg_reward = neg_reward
 
         def handler(signal, frame):
             self.sigint_handler(signal, frame)
@@ -191,6 +203,7 @@ class TrainAgent:
                     pickle.dump(list(self.env.return_queue), f)
 
             total_score = 0.0
+            lives = 5
             # time ticks
             for time in range(5000):
                 # Decide action
@@ -204,6 +217,10 @@ class TrainAgent:
                 next_state = np.concatenate(
                     (state[..., 1:], np.expand_dims(next_state, -1)), axis=-1
                 )
+
+                if info["lives"] < lives:
+                    reward = self.neg_reward
+                    lives = info["lives"]
 
                 # Remember the previous state, action, reward, and done
                 self.agent.remember(state, action, reward, next_state, done)

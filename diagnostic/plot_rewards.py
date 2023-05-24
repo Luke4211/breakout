@@ -2,9 +2,9 @@ import pickle
 import numpy as np
 import matplotlib.pyplot as plt
 
-num_files = 13
+num_files = 23
 window_size = 50
-model_name = "golf"
+model_name = "niner"
 
 data_list = []
 
@@ -33,5 +33,5 @@ plt.plot(smoothed, "r-")
 
 plt.title("Cumulative Rewards")
 plt.xlabel("Episode")
-plt.ylabel("Value")
+plt.ylabel("Score")
 plt.savefig(f"models/{model_name}/reward_chart.png")
