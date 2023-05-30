@@ -2,9 +2,9 @@ import pickle
 import numpy as np
 import matplotlib.pyplot as plt
 
-num_files = 23
+num_files = 18
 window_size = 50
-model_name = "niner"
+model_name = "overlord"
 
 data_list = []
 

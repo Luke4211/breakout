@@ -35,6 +35,7 @@ class DQNAgent:
         batch_size=32,
         model_name="beta",
         decay_func=lambda x, y: x * y,
+        learning_rate=0.00001,
     ):
         """_summary_
 
@@ -63,6 +64,7 @@ class DQNAgent:
         self.batch_size = batch_size
         self.model_name = model_name
         self.decay_func = decay_func
+        self.learning_rate = learning_rate
         self.model = self.build_model()
         self.target_model = self.build_model()
         self.update_target_model()
@@ -86,7 +88,11 @@ class DQNAgent:
         model.add(Flatten())
         model.add(Dense(512, activation="relu"))
         model.add(Dense(self.action_space))
-        model.compile(loss="mse", optimizer=RMSprop(), run_eagerly=False)
+        model.compile(
+            loss="mse",
+            optimizer=RMSprop(learning_rate=self.learning_rate),
+            run_eagerly=False,
+        )
         return model
 
     def update_target_model(self):
@@ -190,7 +196,7 @@ class TrainAgent:
     def train(self):
         total_score: float
         total_steps = 0
-        for e in range(self.max_ep_steps):
+        for e in range(self.num_eps):
             # reset state in the beginning of each game
             state, info = self.env.reset()
             state = np.stack(
@@ -205,7 +211,7 @@ class TrainAgent:
             total_score = 0.0
             lives = 5
             # time ticks
-            for time in range(5000):
+            for time in range(self.max_ep_steps):
                 # Decide action
                 action = self.agent.act(state)
 
@@ -275,3 +281,8 @@ class TrainAgent:
 
                 if done:
                     break
+
+
+class CircularBuffer:
+    def __init__(self, buffer_size):
+        self.buffer = np.empty(0, 5)

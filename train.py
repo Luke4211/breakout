@@ -16,6 +16,7 @@ from config import (
     NEGATIVE_REWARD,
     LOAD_MODEL,
     LOAD_MODEL_NAME,
+    LEARNING_RATE,
 )
 
 env = gym.make("BreakoutNoFrameskip-v4")
@@ -35,6 +36,7 @@ agent = DQNAgent(
     batch_size=BATCH_SIZE,
     model_name=MODEL_NAME,
     decay_func=DECAY_FUNC,
+    learning_rate=LEARNING_RATE,
 )
 
 if LOAD_MODEL:
