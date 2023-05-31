@@ -17,7 +17,6 @@ import sys
 from collections import deque
 import os
 
-
 import pickle
 import psutil
 
@@ -37,6 +36,7 @@ class DQNAgent:
         model_name="beta",
         decay_func=lambda x, y: x * y,
         learning_rate=0.00001,
+        num_envs=8,
     ):
         """_summary_
 
@@ -65,7 +65,10 @@ class DQNAgent:
         self.model_name = model_name
         self.decay_func = decay_func
         self.learning_rate = learning_rate
-        self.memory = CircularBuffer(self.replay_memory_size, num_envs=8)
+        self.memory = CircularBuffer(self.replay_memory_size, num_envs=num_envs)
+        self.writer = tf.summary.create_file_writer(
+            f"models/{self.model_name}/logs/weights"
+        )
         self.model = self.build_model()
         self.target_model = self.build_model()
         self.update_target_model()
@@ -107,41 +110,34 @@ class DQNAgent:
 
         self.memory.append((stacked_state, action, reward, next_state, done))"""
 
-        if self.epsilon > self.epsilon_min:
-            self.epsilon = self.decay_func(self.epsilon, self.epsilon_decay)
-
     def act(self, state):
         if np.random.rand() <= self.epsilon:
             return random.randrange(self.action_space)
-        state = state.astype("float32") / 255.0
+        state = np.array(state).astype("float32") / 255.0
         act_values = self.model.predict(np.expand_dims(state, axis=0), verbose=0)
 
         return np.argmax(act_values[0])  # returns action
 
     @profile
     def act_on_batch(self, states, batch_size):
-        """
-        rand_values = [
-            random.randrange(self.action_space)
-            if np.random.rand() <= self.epsilon
-            else False
-            for _ in self.batch_size
-        ]
-        """
         states = np.array(states).astype("float32") / 255.0
-        rand_values = np.where(
-            np.random.rand(batch_size) <= self.epsilon,
-            np.random.randint(self.action_space, size=batch_size),
-            -1,
+        rand_values = -np.ones(batch_size)
+        random_positions = np.random.rand(batch_size) <= self.epsilon
+        rand_values[random_positions] = np.random.randint(
+            self.action_space, size=np.sum(random_positions)
         )
         pred_values = np.argmax(self.model.predict_on_batch(states), axis=1)
-        pred_values[rand_values != -1] = rand_values[rand_values != -1]
-        return np.array(pred_values).astype("int")
+        pred_values[random_positions] = rand_values[random_positions]
 
-    @profile
+        if self.epsilon > self.epsilon_min:
+            self.epsilon = self.decay_func(self.epsilon, self.epsilon_decay)
+
+        return np.array(pred_values, dtype=np.uint8)
+
+    @tf.function(jit_compile=True)
     def replay(self, num_env):
-        if self.memory.get_size() < self.batch_size * num_env:
-            return
+        # if self.memory.get_size() < self.batch_size * num_env:
+        #    return None, None
 
         states, actions, rewards, next_states, dones = self.memory.sample_memory(
             self.batch_size
@@ -149,23 +145,37 @@ class DQNAgent:
         # minibatch = random.sample(self.memory, self.batch_size * num_env)
         actual_batch_size = len(states)
 
-        states = np.array(states).astype("float32") / 255.0
-        # actions = np.array([i[1] for i in minibatch])
-        # rewards = np.array([i[2] for i in minibatch])
-        next_states = np.array(next_states).astype("float32") / 255.0
-        # dones = np.array([i[4] for i in minibatch])
-        states_tensor = tf.convert_to_tensor(states)
-        next_states_tensor = tf.convert_to_tensor(next_states)
+        states = tf.convert_to_tensor(states, dtype=tf.float32) / 255.0
+        next_states = tf.convert_to_tensor(next_states, dtype=tf.float32) / 255.0
         targets = rewards + self.gamma * (
-            np.amax(self.target_model.predict_on_batch(next_states_tensor), axis=1)
+            tf.reduce_max(self.target_model(next_states), axis=1)
         ) * (1 - dones)
-        targets_full = self.model.predict_on_batch(states_tensor)
+        targets_full = self.model(states)
 
-        ind = np.array([i for i in range(actual_batch_size)])
-        targets_full[[ind], [actions]] = targets
-        x_train = tf.convert_to_tensor(states)
-        y_train = tf.convert_to_tensor(targets_full)
-        self.model.fit(x_train, y_train, epochs=1, verbose=0)
+        # ind = np.array([i for i in range(actual_batch_size)])
+        ind = tf.range(actual_batch_size, dtype=tf.int64)
+        # targets_full[[ind], [actions]] = targets
+        indices = tf.stack([ind, actions], axis=-1)
+        targets_full = tf.tensor_scatter_nd_update(targets_full, indices, targets)
+        # x_train = tf.convert_to_tensor(states)
+        # y_train = tf.convert_to_tensor(targets_full)
+        # self.model.fit(x_train, y_train, epochs=1, verbose=0)
+        with tf.GradientTape() as tape:
+            predictions = self.model(states)
+            loss = tf.keras.losses.MSE(targets_full, predictions)
+
+        gradients = tape.gradient(loss, self.model.trainable_variables)
+        self.model.optimizer.apply_gradients(
+            zip(gradients, self.model.trainable_variables)
+        )
+
+        return predictions, targets_full
+
+    def record_weights(self, steps):
+        with self.writer.as_default():
+            for i, layer in enumerate(self.model.layers):
+                for j, weight in enumerate(layer.weights):
+                    tf.summary.histogram(f"Layer_{i}_Weight_{j}", weight, step=steps)
 
     def save(self, name):
         self.model.save(f"models/{self.model_name}/{name}")
@@ -205,6 +215,12 @@ class TrainAgent:
         self.prog_freq = prog_freq
         self.mem_data = []
         self.neg_reward = neg_reward
+        self.score_writer = tf.summary.create_file_writer(
+            f"models/{self.agent.model_name}/logs/score"
+        )
+        self.q_writer = tf.summary.create_file_writer(
+            f"models/{self.agent.model_name}/logs/q"
+        )
 
         def handler(signal, frame):
             self.sigint_handler(signal, frame)
@@ -220,38 +236,39 @@ class TrainAgent:
     @profile
     def train(self):
         total_score: float
-        reward_queue = []
-        # for e in range(self.num_eps):
-        # reset state in the beginning of each game
+        # reward_queue = []
         states, infos = self.env.reset()
-        """
-        states = [
-            np.stack([state] * self.agent.frame_stack_size, axis=-1) for state in states
-        ]  # initialize the state with the same frame repeated
-        """
-
-        """if (e > 0) and (e % self.save_rate == 0):
-            self.agent.save(f"benchmark_{e}.h5")
-            with open(f"models/{self.agent.model_name}/{e}_rewards.pkl", "wb") as f:
-                pickle.dump(reward_queue, f)
-            reward_queue = []
-            """
 
         total_score = 0.0
-        lives = infos["lives"]
+        lives = np.array(infos["lives"])
         # time ticks
         for steps in range(self.max_steps):
             # Decide action
-            # actions = [self.agent.act(state) for state in states]
             actions = self.agent.act_on_batch(states, self.num_envs)
 
             # Advance the game to the next frame based on the action.
             next_states, rewards, dones, truncs, infos = self.env.step(actions)
             total_score += np.sum(rewards) / self.num_envs
 
+            new_lives = np.array(infos["lives"])
+            death_indices = np.where(lives > new_lives)
+            lives = new_lives
+            dones[death_indices] = True
+            rewards[death_indices] = self.neg_reward
             self.agent.remember(states, actions, rewards, next_states, dones)
             # make next_state the new current state for the next frame.
             states = next_states
+
+            if self.agent.memory.get_size() >= self.agent.batch_size * self.num_envs:
+                predictions, targets = self.agent.replay(self.num_envs)
+            else:
+                predictions, targets = None, None
+
+            # update target model weights every episode
+            if steps % self.update_freq == 0:
+                self.agent.update_target_model()
+                # k.clear_session()
+                # gc.collect()
 
             if steps % self.prog_freq == 0:
                 # print the score and break out of the loop
@@ -262,18 +279,40 @@ class TrainAgent:
                         total_score,
                     )
                 )
-                reward_queue.append((steps, total_score))
+                # reward_queue.append((steps, total_score))
+
+                with self.score_writer.as_default():
+                    tf.summary.scalar(
+                        f"Avg Score per env over {self.prog_freq} steps",
+                        total_score,
+                        step=steps,
+                    )
+                    self.score_writer.flush()
                 total_score = 0.0
 
-            # train the agent with the experience of the episode
-            self.agent.replay(self.num_envs)
-
-            # update target model weights every episode
-            if steps % self.update_freq == 0:
-                self.agent.update_target_model()
-                # k.clear_session()
-                # gc.collect()
-
+                if predictions is not None:
+                    with self.q_writer.as_default():
+                        tf.summary.scalar(
+                            "mean_target_q_value", tf.reduce_mean(targets), step=steps
+                        )
+                        tf.summary.scalar(
+                            "std_target_q_value",
+                            tf.math.reduce_std(targets),
+                            step=steps,
+                        )
+                        tf.summary.scalar(
+                            "mean_predicted_q_value",
+                            tf.reduce_mean(predictions),
+                            step=steps,
+                        )
+                        tf.summary.scalar(
+                            "std_predicted_q_value",
+                            tf.math.reduce_std(predictions),
+                            step=steps,
+                        )
+                        self.q_writer.flush()
+            # self.agent.record_weights(steps)
+            """
             if steps % self.save_rate == 0:
                 if os.path.exists(f"models/{self.agent.model_name}/avg_rewards.pkl"):
                     with open(
@@ -288,6 +327,7 @@ class TrainAgent:
                 ) as file:
                     pickle.dump(existing_data, file)
                 reward_queue = []
+                """
 
         # Save the model after training
         self.agent.save(f"models/{self.agent.model_name}/final_model.h5")
@@ -295,18 +335,19 @@ class TrainAgent:
     def play_model(self):
         for e in range(self.num_eps):
             state, info = self.env.reset()
-            state = np.stack([state] * self.agent.frame_stack_size, axis=-1)
+            # state = np.stack([state] * self.agent.frame_stack_size, axis=-1)
 
-            for time in range(self.max_ep_steps):
+            for time in range(self.max_steps):
                 self.env.render()
 
                 action = self.agent.act(state)
 
                 next_state, _, done, _, _ = self.env.step(action)
-
+                """
                 next_state = np.concatenate(
                     (state[..., 1:], np.expand_dims(next_state, -1)), axis=-1
                 )
+                """
 
                 state = next_state
 
@@ -321,42 +362,47 @@ class CircularBuffer:
         frame_shape=(4, 84, 84),
         stack_size=4,
         action_space=4,
-        num_envs=12,
+        num_envs=8,
     ):
         self.max_size = max_size
         self.frame_shape = frame_shape
         self.stack_size = stack_size
         self.action_space = action_space
         self.num_envs = num_envs
-        self.states = np.empty(((0,) + frame_shape)).astype("uint8")
-        self.actions = np.empty((0,)).astype("uint8")
-        self.rewards = np.empty((0,)).astype("uint8")
-        self.next_states = np.empty(((0,) + frame_shape)).astype("uint8")
-        self.dones = np.empty((0,), dtype=bool)
-        self.index_pointer = 0
+        self.states = np.empty((self.max_size, *frame_shape), dtype=np.uint8)
+        self.actions = np.empty((self.max_size), dtype=np.float32)
+        self.rewards = np.zeros((self.max_size), dtype=np.uint8)
+        self.next_states = np.empty((self.max_size, *frame_shape), dtype=np.uint8)
+        self.dones = np.empty((self.max_size), dtype=bool)
+        self.position = 0
         self.current_size = 0
 
     @profile
     def add_memory(self, states, actions, rewards, next_states, dones):
-        new_size = self.current_size + self.num_envs
-        num_over = 0
-        if new_size > self.max_size:
-            num_over = new_size - self.max_size
+        size = states.shape[0]  # assuming the first dimension is the batch size
+        if self.position + size <= self.max_size:
+            # there's enough space at the end of the buffer
+            self.states[self.position : self.position + size] = states
+            self.actions[self.position : self.position + size] = actions
+            self.rewards[self.position : self.position + size] = rewards
+            self.next_states[self.position : self.position + size] = next_states
+            self.dones[self.position : self.position + size] = dones
         else:
-            self.current_size += self.num_envs
-        # actions = np.eye(self.action_space)[actions]
-        self.states = np.vstack((self.states[num_over:], states))
-        # self.actions = np.vstack((self.actions[num_over:], actions)).astype("uint8")
-        self.actions = np.concatenate((self.actions[num_over:], actions)).astype(
-            "uint8"
-        )
-        # self.rewards = np.vstack((self.rewards[num_over:], rewards))
-        self.rewards = np.concatenate((self.rewards[num_over:], rewards)).astype(
-            "uint8"
-        )
-        self.next_states = np.vstack((self.next_states[num_over:], next_states))
-        self.dones = np.concatenate((self.dones[num_over:], dones))
-        # self.dones = np.vstack((self.dones[num_over:], dones))
+            # the batch spans the end and the beginning of the buffer
+            # split the batch and add it in two parts
+            split = self.max_size - self.position
+            self.states[self.position :] = states[:split]
+            self.actions[self.position :] = actions[:split]
+            self.rewards[self.position :] = rewards[:split]
+            self.next_states[self.position :] = next_states[:split]
+            self.dones[self.position :] = dones[:split]
+            self.states[: size - split] = states[split:]
+            self.actions[: size - split] = actions[split:]
+            self.rewards[: size - split] = rewards[split:]
+            self.next_states[: size - split] = next_states[split:]
+            self.dones[: size - split] = dones[split:]
+        self.position = (self.position + size) % self.max_size
+        self.current_size = min(self.current_size + size, self.max_size)
 
     @profile
     def sample_memory(self, batch_size):

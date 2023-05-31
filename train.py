@@ -21,6 +21,7 @@ from config import (
     NUM_ENVS,
     PROGRESS_FREQ,
     MAX_STEPS,
+    PROFILE,
 )
 
 
@@ -75,9 +76,10 @@ classroom = TrainAgent(
     prog_freq=PROGRESS_FREQ,
     max_steps=MAX_STEPS,
 )
-
-lp = LineProfiler()
-lp_wrapper = lp(classroom.train)
-lp_wrapper()
-# classroom.train()
-lp.print_stats()
+if PROFILE:
+    lp = LineProfiler()
+    lp_wrapper = lp(classroom.train)
+    lp_wrapper()
+    lp.print_stats()
+else:
+    classroom.train()
