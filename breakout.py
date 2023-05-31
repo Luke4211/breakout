@@ -104,9 +104,9 @@ class DQNAgent:
         stacked_state = np.array(state)
 
         self.memory.append((stacked_state, action, reward, next_state, done))
-        # print(f'Size of memory entry: {asizeof.asizeof(self.memory.pop())}')
-        # print(f'type of next_state: {type(next_state[0][0][0])}')
-        # print(f'type of stacked_state: {type(stacked_state[0][0][0])}')
+
+        if self.epsilon > self.epsilon_min:
+            self.epsilon = self.decay_func(self.epsilon, self.epsilon_decay)
 
     def act(self, state):
         if np.random.rand() <= self.epsilon:
@@ -116,10 +116,10 @@ class DQNAgent:
 
         return np.argmax(act_values[0])  # returns action
 
-    def replay(self):
-        if len(self.memory) < self.batch_size:
+    def replay(self, num_env):
+        if len(self.memory) < self.batch_size * num_env:
             return
-        minibatch = random.sample(self.memory, self.batch_size)
+        minibatch = random.sample(self.memory, self.batch_size * num_env)
         actual_batch_size = len(minibatch)
 
         states = np.array([i[0] for i in minibatch]).astype("float32") / 255.0
@@ -137,9 +137,6 @@ class DQNAgent:
         targets_full[[ind], [actions]] = targets
 
         self.model.fit(states, targets_full, epochs=1, verbose=0)
-
-        if self.epsilon > self.epsilon_min:
-            self.epsilon = self.decay_func(self.epsilon, self.epsilon_decay)
 
     def save(self, name):
         self.model.save(f"models/{self.model_name}/{name}")
@@ -161,19 +158,22 @@ class TrainAgent:
         self,
         env,
         agent,
+        num_envs,
         num_eps=1500,
-        max_ep_steps=5000,
+        max_steps=5000000,
         save_rate=100,
         update_freq=3,
         neg_reward=-0.5,
+        prog_freq=5000,
     ):
         self.env = env
         self.agent = agent
+        self.num_envs = num_envs
         self.num_eps = num_eps
-        self.max_ep_steps = max_ep_steps
+        self.max_steps = max_steps
         self.save_rate = save_rate
         self.update_freq = update_freq
-        self.process = psutil.Process()
+        self.prog_freq = prog_freq
         self.mem_data = []
         self.neg_reward = neg_reward
 
@@ -181,11 +181,6 @@ class TrainAgent:
             self.sigint_handler(signal, frame)
 
         signal.signal(signal.SIGINT, handler)
-
-    def get_memory(self):
-        memory_info = self.process.memory_info()
-        memory_usage_mb = memory_info.rss / (1024**2)
-        return memory_usage_mb
 
     def sigint_handler(self, signal, frame):
         with open(f"models/{self.agent.model_name}/mem_usage.pkl", "wb") as f:
@@ -195,71 +190,99 @@ class TrainAgent:
 
     def train(self):
         total_score: float
-        total_steps = 0
-        for e in range(self.num_eps):
-            # reset state in the beginning of each game
-            state, info = self.env.reset()
-            state = np.stack(
-                [state] * self.agent.frame_stack_size, axis=-1
-            )  # initialize the state with the same frame repeated
+        reward_queue = []
+        # for e in range(self.num_eps):
+        # reset state in the beginning of each game
+        states, infos = self.env.reset()
+        states = [
+            np.stack([state] * self.agent.frame_stack_size, axis=-1) for state in states
+        ]  # initialize the state with the same frame repeated
 
-            if (e > 0) and (e % self.save_rate == 0):
-                self.agent.save(f"benchmark_{e}.h5")
-                with open(f"models/{self.agent.model_name}/{e}_rewards.pkl", "wb") as f:
-                    pickle.dump(list(self.env.return_queue), f)
+        """if (e > 0) and (e % self.save_rate == 0):
+            self.agent.save(f"benchmark_{e}.h5")
+            with open(f"models/{self.agent.model_name}/{e}_rewards.pkl", "wb") as f:
+                pickle.dump(reward_queue, f)
+            reward_queue = []
+            """
 
-            total_score = 0.0
-            lives = 5
-            # time ticks
-            for time in range(self.max_ep_steps):
-                # Decide action
-                action = self.agent.act(state)
+        total_score = 0.0
+        lives = infos["lives"]
+        # time ticks
+        for steps in range(self.max_steps):
+            # Decide action
+            actions = [self.agent.act(state) for state in states]
 
-                # Advance the game to the next frame based on the action.
-                next_state, reward, done, trunc, info = self.env.step(action)
+            # Advance the game to the next frame based on the action.
+            next_states, rewards, dones, truncs, infos = self.env.step(actions)
 
-                total_score += reward
+            total_score += np.sum(rewards) / self.num_envs
 
-                next_state = np.concatenate(
+            next_states = [
+                np.concatenate(
                     (state[..., 1:], np.expand_dims(next_state, -1)), axis=-1
                 )
+                for (state, next_state) in zip(states, next_states)
+            ]
 
-                if info["lives"] < lives:
-                    reward = self.neg_reward
-                    lives = info["lives"]
+            """rewards_tmp = []
+            lives_tmp = []
+            for next_lives, reward, live in zip(infos["lives"], rewards, lives):
+                if next_lives < live:
+                    rewards_tmp.append(self.neg_reward)
+                    lives_tmp.append(next_lives)
+            rewards, lives = rewards_tmp, lives_tmp"""
 
-                # Remember the previous state, action, reward, and done
+            # Remember the previous state, action, reward, and done
+            for state, action, reward, next_state, done in zip(
+                states,
+                actions,
+                rewards,
+                next_states,
+                dones,
+            ):
                 self.agent.remember(state, action, reward, next_state, done)
 
-                # make next_state the new current state for the next frame.
-                state = next_state
+            # make next_state the new current state for the next frame.
+            states = next_states
 
-                if done:
-                    # print the score and break out of the loop
-                    print(
-                        "episode: {}/{}, score: {}, num_steps: {}".format(
-                            e, self.num_eps, total_score, total_steps + time
-                        )
+            if steps % self.prog_freq == 0:
+                # print the score and break out of the loop
+                print(
+                    "steps: {}/{}, avg score: {}".format(
+                        steps * self.num_envs,
+                        self.max_steps * self.num_envs,
+                        total_score / self.num_envs,
                     )
-                    break
+                )
+                reward_queue.append((steps, total_score / self.num_envs))
+                total_score = 0.0
 
-                # train the agent with the experience of the episode
-                self.agent.replay()
+            # train the agent with the experience of the episode
+            self.agent.replay(self.num_envs)
 
-                # update target model weights every episode
-                if (total_steps + time) % self.update_freq == 0:
-                    self.agent.update_target_model()
+            # update target model weights every episode
+            if self.num_envs % self.update_freq == 0:
+                self.agent.update_target_model()
+                k.clear_session()
+                gc.collect()
 
-            total_steps += time
-            # print(f'Size of memory entry: {asizeof.asizeof(agent.memory)}')
-            print(f"mem: {self.get_memory()}")
-            self.mem_data.append((total_steps, self.get_memory()))
-            k.clear_session()
-            gc.collect()
+            if steps % self.save_rate == 0:
+                if os.path.exists(f"models/{self.agent.model_name}/avg_rewards.pkl"):
+                    with open(
+                        f"models/{self.agent.model_name}/avg_rewards.pkl", "rb"
+                    ) as file:
+                        existing_data = pickle.load(file)
+                else:
+                    existing_data = []
+                existing_data.extend(reward_queue)
+                with open(
+                    f"models/{self.agent.model_name}/avg_rewards.pkl", "wb"
+                ) as file:
+                    pickle.dump(existing_data, file)
+                reward_queue = []
+
         # Save the model after training
         self.agent.save(f"models/{self.agent.model_name}/final_model.h5")
-        with open(f"models/{self.agent.model_name}/final_mem_usage.pkl", "wb") as f:
-            pickle.dump(self.mem_data, f)
 
     def play_model(self):
         for e in range(self.num_eps):
@@ -284,5 +307,44 @@ class TrainAgent:
 
 
 class CircularBuffer:
-    def __init__(self, buffer_size):
-        self.buffer = np.empty(0, 5)
+    def __init__(
+        self, max_size, frame_shape=(84, 84), stack_size=4, action_space=4, num_envs=12
+    ):
+        self.max_size = max_size
+        self.frame_shape = frame_shape
+        self.stack_size = stack_size
+        self.action_space = action_space
+        self.num_envs = num_envs
+        self.states = np.empty((0, frame_shape, stack_size))
+        self.actions = np.empty((0, action_space))
+        self.rewards = np.empty(0)
+        self.next_states = np.empty((0, frame_shape, stack_size))
+        self.dones = np.empty(0, dtype=bool)
+        self.index_pointer = 0
+        self.current_size = 0
+
+    def add_memory(self, states, actions, rewards, next_states, dones):
+        new_size = self.current_size + self.num_envs
+        num_over = 0
+        if new_size > self.max_size:
+            num_over = new_size - self.max_size
+        else:
+            self.current_size += self.num_envs
+        self.states = np.vstack(self.states[num_over:], states)
+        self.actions = np.vstack(self.actions[num_over:], actions)
+        self.rewards = np.vstack(self.rewards[num_over:], rewards)
+        self.next_states = np.vstack(self.next_states[num_over:], next_states)
+        self.dones = np.vstack(self.dones[num_over:], dones)
+
+    def sample_memory(self, batch_size):
+        indices = np.random.choice(self.current_size, batch_size, replace=False)
+        states = self.states[indices]
+        actions = self.actions[indices]
+        rewards = self.rewards[indices]
+        next_states = self.next_states[indices]
+        dones = self.dones[indices]
+
+        return states, actions, rewards, next_states, dones
+
+    def get_size(self):
+        return self.current_size

@@ -17,17 +17,34 @@ from config import (
     LOAD_MODEL,
     LOAD_MODEL_NAME,
     LEARNING_RATE,
+    NUM_ENVS,
+    PROGRESS_FREQ,
 )
 
-env = gym.make("BreakoutNoFrameskip-v4")
-env = AtariPreprocessing(env, noop_max=10)
-env = RecordEpisodeStatistics(env)
 
-print(env.observation_space)
+def wrap_env(env):
+    env = AtariPreprocessing(env, noop_max=20)
+    # env = RecordEpisodeStatistics(env)
+    return env
+
+
+env_list = []
+for _ in range(NUM_ENVS):
+    tmp = gym.make("BreakoutNoFrameskip-v4")
+    tmp = wrap_env(tmp)
+    env_list.append(lambda: tmp)
+env = gym.make("BreakoutNoFrameskip-v4")
+envs = gym.vector.AsyncVectorEnv(
+    env_list,
+    shared_memory=False,
+)
+
+
+print(envs.single_observation_space.shape)
 print(f"Training model {MODEL_NAME}")
 agent = DQNAgent(
-    env.observation_space.shape,
-    env.action_space.n,
+    envs.single_observation_space.shape,
+    envs.single_action_space.n,
     replay_memory_size=MEMORY_SIZE,
     gamma=GAMMA,
     epsilon=EPSILON_START,
@@ -43,12 +60,14 @@ if LOAD_MODEL:
     agent.load_other(LOAD_MODEL_NAME)
 
 classroom = TrainAgent(
-    env,
+    envs,
     agent,
+    NUM_ENVS,
     num_eps=NUM_EPS,
     save_rate=SAVE_RATE,
     update_freq=UPDATE_FREQ,
     neg_reward=NEGATIVE_REWARD,
+    prog_freq=PROGRESS_FREQ,
 )
 
 classroom.train()

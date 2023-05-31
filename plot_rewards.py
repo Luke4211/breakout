@@ -1,20 +1,20 @@
 import pickle
 import numpy as np
 import matplotlib.pyplot as plt
+from config import MODEL_NAME, PROGRESS_FREQ, NUM_ENVS
 
 window_size = 50
-model_name = "pfizer"
 
 data_list = []
 
 # Load and unpickle the array
 
 
-with open(f"models/{model_name}/avg_rewards.pkl", "rb") as f:
+with open(f"models/{MODEL_NAME}/avg_rewards.pkl", "rb") as f:
     data_list = pickle.load(f)
-    print(data_list)
 data_list = np.array(data_list)
 x, y = zip(*data_list)
+x = [i * NUM_ENVS for i in x]
 
 
 plt.figure()
@@ -27,7 +27,7 @@ smoothed = np.convolve(
 )
 plt.plot(x, y, "r-")
 
-plt.title("Cumulative Rewards")
-plt.xlabel("Episode")
-plt.ylabel("Score")
-plt.savefig(f"models/{model_name}/reward_chart.png")
+plt.title(f"Avg. Reward per {PROGRESS_FREQ} steps.")
+plt.xlabel("Steps")
+plt.ylabel("Avg. Reward")
+plt.savefig(f"models/{MODEL_NAME}/reward_chart.png")
