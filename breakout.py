@@ -3,6 +3,7 @@ import tensorflow as tf
 # from tensorflow import keras
 from keras.models import Sequential
 from keras.layers import Dense, Flatten
+import line_profiler
 
 # from tensorflow.keras.optimizers import Adam
 from keras.optimizers import RMSprop
@@ -54,7 +55,6 @@ class DQNAgent:
         """
         self.state_shape = state_shape
         self.action_space = action_space
-        self.memory = deque(maxlen=replay_memory_size)
         self.replay_memory_size = replay_memory_size
         self.frame_stack_size = frame_stack_size
         self.gamma = gamma  # discount factor
@@ -65,6 +65,7 @@ class DQNAgent:
         self.model_name = model_name
         self.decay_func = decay_func
         self.learning_rate = learning_rate
+        self.memory = CircularBuffer(self.replay_memory_size, num_envs=8)
         self.model = self.build_model()
         self.target_model = self.build_model()
         self.update_target_model()
@@ -80,7 +81,7 @@ class DQNAgent:
                 strides=(4, 4),
                 padding="same",
                 activation="relu",
-                input_shape=[*self.state_shape, self.frame_stack_size],
+                input_shape=[*self.state_shape],
             )
         )
         model.add(Conv2D(64, (4, 4), strides=(2, 2), padding="same", activation="relu"))
@@ -92,18 +93,19 @@ class DQNAgent:
             loss="mse",
             optimizer=RMSprop(learning_rate=self.learning_rate),
             run_eagerly=False,
+            jit_compile=True,
         )
         return model
 
     def update_target_model(self):
         self.target_model.set_weights(self.model.get_weights())
 
-    def remember(self, state, action, reward, next_state, done):
-        if len(self.memory) > self.replay_memory_size:
-            self.memory.popleft()
-        stacked_state = np.array(state)
+    def remember(self, states, actions, rewards, next_states, dones):
+        self.memory.add_memory(states, actions, rewards, next_states, dones)
 
-        self.memory.append((stacked_state, action, reward, next_state, done))
+        """stacked_state = np.array(state)
+
+        self.memory.append((stacked_state, action, reward, next_state, done))"""
 
         if self.epsilon > self.epsilon_min:
             self.epsilon = self.decay_func(self.epsilon, self.epsilon_decay)
@@ -116,27 +118,54 @@ class DQNAgent:
 
         return np.argmax(act_values[0])  # returns action
 
+    @profile
+    def act_on_batch(self, states, batch_size):
+        """
+        rand_values = [
+            random.randrange(self.action_space)
+            if np.random.rand() <= self.epsilon
+            else False
+            for _ in self.batch_size
+        ]
+        """
+        states = np.array(states).astype("float32") / 255.0
+        rand_values = np.where(
+            np.random.rand(batch_size) <= self.epsilon,
+            np.random.randint(self.action_space, size=batch_size),
+            -1,
+        )
+        pred_values = np.argmax(self.model.predict_on_batch(states), axis=1)
+        pred_values[rand_values != -1] = rand_values[rand_values != -1]
+        return np.array(pred_values).astype("int")
+
+    @profile
     def replay(self, num_env):
-        if len(self.memory) < self.batch_size * num_env:
+        if self.memory.get_size() < self.batch_size * num_env:
             return
-        minibatch = random.sample(self.memory, self.batch_size * num_env)
-        actual_batch_size = len(minibatch)
 
-        states = np.array([i[0] for i in minibatch]).astype("float32") / 255.0
-        actions = np.array([i[1] for i in minibatch])
-        rewards = np.array([i[2] for i in minibatch])
-        next_states = np.array([i[3] for i in minibatch]).astype("float32") / 255.0
-        dones = np.array([i[4] for i in minibatch])
+        states, actions, rewards, next_states, dones = self.memory.sample_memory(
+            self.batch_size
+        )
+        # minibatch = random.sample(self.memory, self.batch_size * num_env)
+        actual_batch_size = len(states)
 
+        states = np.array(states).astype("float32") / 255.0
+        # actions = np.array([i[1] for i in minibatch])
+        # rewards = np.array([i[2] for i in minibatch])
+        next_states = np.array(next_states).astype("float32") / 255.0
+        # dones = np.array([i[4] for i in minibatch])
+        states_tensor = tf.convert_to_tensor(states)
+        next_states_tensor = tf.convert_to_tensor(next_states)
         targets = rewards + self.gamma * (
-            np.amax(self.target_model.predict_on_batch(next_states), axis=1)
+            np.amax(self.target_model.predict_on_batch(next_states_tensor), axis=1)
         ) * (1 - dones)
-        targets_full = self.model.predict_on_batch(states)
+        targets_full = self.model.predict_on_batch(states_tensor)
 
         ind = np.array([i for i in range(actual_batch_size)])
         targets_full[[ind], [actions]] = targets
-
-        self.model.fit(states, targets_full, epochs=1, verbose=0)
+        x_train = tf.convert_to_tensor(states)
+        y_train = tf.convert_to_tensor(targets_full)
+        self.model.fit(x_train, y_train, epochs=1, verbose=0)
 
     def save(self, name):
         self.model.save(f"models/{self.model_name}/{name}")
@@ -167,7 +196,7 @@ class TrainAgent:
         prog_freq=5000,
     ):
         self.env = env
-        self.agent = agent
+        self.agent: DQNAgent = agent
         self.num_envs = num_envs
         self.num_eps = num_eps
         self.max_steps = max_steps
@@ -188,15 +217,18 @@ class TrainAgent:
         self.agent.handle_interrupt()
         sys.exit(0)
 
+    @profile
     def train(self):
         total_score: float
         reward_queue = []
         # for e in range(self.num_eps):
         # reset state in the beginning of each game
         states, infos = self.env.reset()
+        """
         states = [
             np.stack([state] * self.agent.frame_stack_size, axis=-1) for state in states
         ]  # initialize the state with the same frame repeated
+        """
 
         """if (e > 0) and (e % self.save_rate == 0):
             self.agent.save(f"benchmark_{e}.h5")
@@ -210,38 +242,14 @@ class TrainAgent:
         # time ticks
         for steps in range(self.max_steps):
             # Decide action
-            actions = [self.agent.act(state) for state in states]
+            # actions = [self.agent.act(state) for state in states]
+            actions = self.agent.act_on_batch(states, self.num_envs)
 
             # Advance the game to the next frame based on the action.
             next_states, rewards, dones, truncs, infos = self.env.step(actions)
-
             total_score += np.sum(rewards) / self.num_envs
 
-            next_states = [
-                np.concatenate(
-                    (state[..., 1:], np.expand_dims(next_state, -1)), axis=-1
-                )
-                for (state, next_state) in zip(states, next_states)
-            ]
-
-            """rewards_tmp = []
-            lives_tmp = []
-            for next_lives, reward, live in zip(infos["lives"], rewards, lives):
-                if next_lives < live:
-                    rewards_tmp.append(self.neg_reward)
-                    lives_tmp.append(next_lives)
-            rewards, lives = rewards_tmp, lives_tmp"""
-
-            # Remember the previous state, action, reward, and done
-            for state, action, reward, next_state, done in zip(
-                states,
-                actions,
-                rewards,
-                next_states,
-                dones,
-            ):
-                self.agent.remember(state, action, reward, next_state, done)
-
+            self.agent.remember(states, actions, rewards, next_states, dones)
             # make next_state the new current state for the next frame.
             states = next_states
 
@@ -251,20 +259,20 @@ class TrainAgent:
                     "steps: {}/{}, avg score: {}".format(
                         steps * self.num_envs,
                         self.max_steps * self.num_envs,
-                        total_score / self.num_envs,
+                        total_score,
                     )
                 )
-                reward_queue.append((steps, total_score / self.num_envs))
+                reward_queue.append((steps, total_score))
                 total_score = 0.0
 
             # train the agent with the experience of the episode
             self.agent.replay(self.num_envs)
 
             # update target model weights every episode
-            if self.num_envs % self.update_freq == 0:
+            if steps % self.update_freq == 0:
                 self.agent.update_target_model()
-                k.clear_session()
-                gc.collect()
+                # k.clear_session()
+                # gc.collect()
 
             if steps % self.save_rate == 0:
                 if os.path.exists(f"models/{self.agent.model_name}/avg_rewards.pkl"):
@@ -308,21 +316,27 @@ class TrainAgent:
 
 class CircularBuffer:
     def __init__(
-        self, max_size, frame_shape=(84, 84), stack_size=4, action_space=4, num_envs=12
+        self,
+        max_size,
+        frame_shape=(4, 84, 84),
+        stack_size=4,
+        action_space=4,
+        num_envs=12,
     ):
         self.max_size = max_size
         self.frame_shape = frame_shape
         self.stack_size = stack_size
         self.action_space = action_space
         self.num_envs = num_envs
-        self.states = np.empty((0, frame_shape, stack_size))
-        self.actions = np.empty((0, action_space))
-        self.rewards = np.empty(0)
-        self.next_states = np.empty((0, frame_shape, stack_size))
-        self.dones = np.empty(0, dtype=bool)
+        self.states = np.empty(((0,) + frame_shape)).astype("uint8")
+        self.actions = np.empty((0,)).astype("uint8")
+        self.rewards = np.empty((0,)).astype("uint8")
+        self.next_states = np.empty(((0,) + frame_shape)).astype("uint8")
+        self.dones = np.empty((0,), dtype=bool)
         self.index_pointer = 0
         self.current_size = 0
 
+    @profile
     def add_memory(self, states, actions, rewards, next_states, dones):
         new_size = self.current_size + self.num_envs
         num_over = 0
@@ -330,14 +344,25 @@ class CircularBuffer:
             num_over = new_size - self.max_size
         else:
             self.current_size += self.num_envs
-        self.states = np.vstack(self.states[num_over:], states)
-        self.actions = np.vstack(self.actions[num_over:], actions)
-        self.rewards = np.vstack(self.rewards[num_over:], rewards)
-        self.next_states = np.vstack(self.next_states[num_over:], next_states)
-        self.dones = np.vstack(self.dones[num_over:], dones)
+        # actions = np.eye(self.action_space)[actions]
+        self.states = np.vstack((self.states[num_over:], states))
+        # self.actions = np.vstack((self.actions[num_over:], actions)).astype("uint8")
+        self.actions = np.concatenate((self.actions[num_over:], actions)).astype(
+            "uint8"
+        )
+        # self.rewards = np.vstack((self.rewards[num_over:], rewards))
+        self.rewards = np.concatenate((self.rewards[num_over:], rewards)).astype(
+            "uint8"
+        )
+        self.next_states = np.vstack((self.next_states[num_over:], next_states))
+        self.dones = np.concatenate((self.dones[num_over:], dones))
+        # self.dones = np.vstack((self.dones[num_over:], dones))
 
+    @profile
     def sample_memory(self, batch_size):
-        indices = np.random.choice(self.current_size, batch_size, replace=False)
+        indices = np.random.choice(
+            self.current_size, batch_size * self.num_envs, replace=True
+        )
         states = self.states[indices]
         actions = self.actions[indices]
         rewards = self.rewards[indices]

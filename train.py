@@ -1,6 +1,7 @@
 from breakout import DQNAgent, TrainAgent
 import gymnasium as gym
-from gymnasium.wrappers import AtariPreprocessing, RecordEpisodeStatistics
+from gymnasium.wrappers import AtariPreprocessing, FrameStack
+from line_profiler import LineProfiler
 from config import (
     MODEL_NAME,
     SAVE_RATE,
@@ -19,15 +20,18 @@ from config import (
     LEARNING_RATE,
     NUM_ENVS,
     PROGRESS_FREQ,
+    MAX_STEPS,
 )
 
 
 def wrap_env(env):
     env = AtariPreprocessing(env, noop_max=20)
+    env = FrameStack(env, 4)
     # env = RecordEpisodeStatistics(env)
     return env
 
 
+"""
 env_list = []
 for _ in range(NUM_ENVS):
     tmp = gym.make("BreakoutNoFrameskip-v4")
@@ -38,7 +42,8 @@ envs = gym.vector.AsyncVectorEnv(
     env_list,
     shared_memory=False,
 )
-
+"""
+envs = gym.vector.make("BreakoutNoFrameskip-v4", NUM_ENVS, wrappers=wrap_env)
 
 print(envs.single_observation_space.shape)
 print(f"Training model {MODEL_NAME}")
@@ -68,6 +73,11 @@ classroom = TrainAgent(
     update_freq=UPDATE_FREQ,
     neg_reward=NEGATIVE_REWARD,
     prog_freq=PROGRESS_FREQ,
+    max_steps=MAX_STEPS,
 )
 
-classroom.train()
+lp = LineProfiler()
+lp_wrapper = lp(classroom.train)
+lp_wrapper()
+# classroom.train()
+lp.print_stats()
