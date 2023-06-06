@@ -320,6 +320,7 @@ class TrainAgent:
             dones = np.array(dones)
             dones[death_indices] = True
             rewards[dones] = self.neg_reward
+            rewards = tf.convert_to_tensor(rewards, dtype=tf.uint8)
             self.agent.remember(states, actions, rewards, next_states, dones)
             self.agent.decay_epsilon()
             # make next_state the new current state for the next frame.
@@ -477,49 +478,65 @@ class CircularBuffer:
         self.stack_size = stack_size
         self.action_space = action_space
         self.num_envs = num_envs
-        self.states = np.empty((self.max_size, *frame_shape), dtype=np.uint8)
-        self.actions = np.empty((self.max_size), dtype=np.float64)
-        self.rewards = np.zeros((self.max_size), dtype=np.float64)
-        self.next_states = np.empty((self.max_size, *frame_shape), dtype=np.uint8)
-        self.dones = np.empty((self.max_size), dtype=bool)
+
+        self.states = tf.TensorArray(
+            dtype=tf.uint8,
+            size=self.max_size,
+            dynamic_size=False,
+            clear_after_read=False,
+        )
+        self.actions = tf.TensorArray(
+            dtype=tf.uint8,
+            size=self.max_size,
+            dynamic_size=False,
+            clear_after_read=False,
+        )
+        self.rewards = tf.TensorArray(
+            dtype=tf.uint8,
+            size=self.max_size,
+            dynamic_size=False,
+            clear_after_read=False,
+        )
+        self.next_states = tf.TensorArray(
+            dtype=tf.uint8,
+            size=self.max_size,
+            dynamic_size=False,
+            clear_after_read=False,
+        )
+        self.dones = tf.TensorArray(
+            dtype=tf.bool,
+            size=self.max_size,
+            dynamic_size=False,
+            clear_after_read=False,
+        )
+
         self.position = 0
         self.current_size = 0
 
     def add_memory(self, states, actions, rewards, next_states, dones):
-        size = states.shape[0]  # assuming the first dimension is the batch size
-        if self.position + size <= self.max_size:
-            # there's enough space at the end of the buffer
-            self.states[self.position : self.position + size] = states
-            self.actions[self.position : self.position + size] = actions
-            self.rewards[self.position : self.position + size] = rewards
-            self.next_states[self.position : self.position + size] = next_states
-            self.dones[self.position : self.position + size] = dones
-        else:
-            # the batch spans the end and the beginning of the buffer
-            # split the batch and add it in two parts
-            split = self.max_size - self.position
-            self.states[self.position :] = states[:split]
-            self.actions[self.position :] = actions[:split]
-            self.rewards[self.position :] = rewards[:split]
-            self.next_states[self.position :] = next_states[:split]
-            self.dones[self.position :] = dones[:split]
-            self.states[: size - split] = states[split:]
-            self.actions[: size - split] = actions[split:]
-            self.rewards[: size - split] = rewards[split:]
-            self.next_states[: size - split] = next_states[split:]
-            self.dones[: size - split] = dones[split:]
+        size = states.shape[0]
+        indices = (
+            tf.range(start=self.position, limit=self.position + size) % self.max_size
+        )
+
+        self.states = self.states.scatter(indices, states)
+        self.actions = self.actions.scatter(indices, actions)
+        self.rewards = self.rewards.scatter(indices, rewards)
+        self.next_states = self.next_states.scatter(indices, next_states)
+        self.dones = self.dones.scatter(indices, dones)
+
         self.position = (self.position + size) % self.max_size
         self.current_size = min(self.current_size + size, self.max_size)
 
     def sample_memory(self, batch_size):
-        indices = np.random.choice(
-            self.current_size, batch_size * self.num_envs, replace=True
+        indices = tf.random.uniform(
+            (batch_size * self.num_envs,), 0, self.current_size, dtype=tf.int32
         )
-        states = self.states[indices]
-        actions = self.actions[indices]
-        rewards = self.rewards[indices]
-        next_states = self.next_states[indices]
-        dones = self.dones[indices]
+        states = self.states.gather(indices)
+        actions = self.actions.gather(indices)
+        rewards = self.rewards.gather(indices)
+        next_states = self.next_states.gather(indices)
+        dones = self.dones.gather(indices)
 
         return states, actions, rewards, next_states, dones
 
