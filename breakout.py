@@ -6,7 +6,7 @@ from keras.layers import Dense, Flatten
 import line_profiler
 
 # from tensorflow.keras.optimizers import Adam
-from keras.optimizers import RMSprop
+from keras.optimizers import RMSprop, Adam
 import numpy as np
 import random
 import signal
@@ -19,6 +19,10 @@ import os
 
 import pickle
 import psutil
+import cv2
+from tensorflow.python.profiler import profiler_v2 as profiler
+
+# tf.compat.v1.disable_eager_execution()
 
 
 class DQNAgent:
@@ -91,10 +95,37 @@ class DQNAgent:
         model.add(Conv2D(64, (3, 3), strides=(1, 1), padding="same", activation="relu"))
         model.add(Flatten())
         model.add(Dense(512, activation="relu"))
+        model.add(Dense(self.action_space, activation="linear"))
+        model.compile(
+            loss="mse",
+            optimizer=Adam(learning_rate=self.learning_rate),
+            run_eagerly=False,
+            jit_compile=True,
+        )
+        return model
+
+    # clipnorm = 1.0 for optimizer
+
+    def build_small_model(self):
+        model = Sequential()
+
+        model.add(
+            Conv2D(
+                16,
+                (8, 8),
+                strides=(4, 4),
+                padding="same",
+                activation="relu",
+                input_shape=[*self.state_shape],
+            )
+        )
+        model.add(Conv2D(32, (4, 4), strides=(2, 2), padding="same", activation="relu"))
+        model.add(Flatten())
+        model.add(Dense(256, activation="relu"))
         model.add(Dense(self.action_space))
         model.compile(
             loss="mse",
-            optimizer=RMSprop(learning_rate=self.learning_rate),
+            optimizer=Adam(learning_rate=self.learning_rate, clipnorm=1.0),
             run_eagerly=False,
             jit_compile=True,
         )
@@ -118,21 +149,31 @@ class DQNAgent:
 
         return np.argmax(act_values[0])  # returns action
 
-    @profile
+    @tf.function(jit_compile=True)
     def act_on_batch(self, states, batch_size):
-        states = np.array(states).astype("float32") / 255.0
-        rand_values = -np.ones(batch_size)
-        random_positions = np.random.rand(batch_size) <= self.epsilon
-        rand_values[random_positions] = np.random.randint(
-            self.action_space, size=np.sum(random_positions)
+        states = tf.cast(states, dtype=tf.float32) / 255.0
+        rand_values = -tf.ones(batch_size, dtype=tf.float32)
+        random_positions = (
+            tf.random.uniform(shape=(batch_size,), minval=0, maxval=1) <= self.epsilon
         )
-        pred_values = np.argmax(self.model.predict_on_batch(states), axis=1)
-        pred_values[random_positions] = rand_values[random_positions]
 
-        if self.epsilon > self.epsilon_min:
-            self.epsilon = self.decay_func(self.epsilon, self.epsilon_decay)
+        random_integers = tf.random.uniform(
+            shape=(batch_size,),
+            minval=0,
+            maxval=self.action_space,
+            dtype=tf.int32,
+        )
+        rand_values = tf.where(
+            random_positions, tf.cast(random_integers, tf.float32), rand_values
+        )
 
-        return np.array(pred_values, dtype=np.uint8)
+        pred_values = tf.argmax(self.model(states), axis=1, output_type=tf.int32)
+
+        pred_values = tf.where(
+            random_positions, tf.cast(rand_values, tf.int32), pred_values
+        )
+
+        return tf.cast(pred_values, dtype=np.uint8)
 
     @tf.function(jit_compile=True)
     def replay(self, num_env):
@@ -171,6 +212,10 @@ class DQNAgent:
 
         return predictions, targets_full
 
+    def decay_epsilon(self):
+        if self.epsilon > self.epsilon_min:
+            self.epsilon = self.decay_func(self.epsilon, self.epsilon_decay)
+
     def record_weights(self, steps):
         with self.writer.as_default():
             for i, layer in enumerate(self.model.layers):
@@ -204,6 +249,9 @@ class TrainAgent:
         update_freq=3,
         neg_reward=-0.5,
         prog_freq=5000,
+        min_sample_size=50000,
+        video_env=None,
+        video_freq=10000,
     ):
         self.env = env
         self.agent: DQNAgent = agent
@@ -215,6 +263,10 @@ class TrainAgent:
         self.prog_freq = prog_freq
         self.mem_data = []
         self.neg_reward = neg_reward
+        self.min_sample_size = min_sample_size
+        self.video_env = video_env
+        self.video_freq = video_freq
+        self.rewards_deque = deque(maxlen=self.num_eps)
         self.score_writer = tf.summary.create_file_writer(
             f"models/{self.agent.model_name}/logs/score"
         )
@@ -233,58 +285,73 @@ class TrainAgent:
         self.agent.handle_interrupt()
         sys.exit(0)
 
-    @profile
     def train(self):
         total_score: float
         # reward_queue = []
         states, infos = self.env.reset()
-
+        # self.view_frames(states[0])
         total_score = 0.0
         lives = np.array(infos["lives"])
+        # lives = np.array([d["lives"] for d in infos])
         # time ticks
+        death_indices = []
         for steps in range(self.max_steps):
             # Decide action
+
             actions = self.agent.act_on_batch(states, self.num_envs)
+            # actions = np.array([self.agent.act(states[0])])
+            actions = actions.numpy()
 
             # Advance the game to the next frame based on the action.
             next_states, rewards, dones, truncs, infos = self.env.step(actions)
-            total_score += np.sum(rewards) / self.num_envs
+            actions[death_indices] = 1
+            total_score += np.sum(rewards)
+            if "episode" in infos:
+                episode_results = np.array(infos["episode"]["r"])
+                indices = np.array(infos["_episode"])
+                rs = episode_results[indices]
+                for reward in rs:
+                    self.rewards_deque.append(reward)
 
             new_lives = np.array(infos["lives"])
+            # new_lives = np.array([d["lives"] for d in infos])
             death_indices = np.where(lives > new_lives)
             lives = new_lives
+            dones = np.array(dones)
             dones[death_indices] = True
-            rewards[death_indices] = self.neg_reward
+            rewards[dones] = self.neg_reward
             self.agent.remember(states, actions, rewards, next_states, dones)
+            self.agent.decay_epsilon()
             # make next_state the new current state for the next frame.
             states = next_states
 
-            if self.agent.memory.get_size() >= self.agent.batch_size * self.num_envs:
+            if self.agent.memory.get_size() >= self.min_sample_size:
                 predictions, targets = self.agent.replay(self.num_envs)
+                predictions = predictions.numpy()
+                targets = targets.numpy()
             else:
                 predictions, targets = None, None
 
-            # update target model weights every episode
             if steps % self.update_freq == 0:
                 self.agent.update_target_model()
-                # k.clear_session()
-                # gc.collect()
 
-            if steps % self.prog_freq == 0:
+            if steps % self.prog_freq == 0 and len(self.rewards_deque) == self.num_eps:
+                # ep_scores = self.env.return_queue
                 # print the score and break out of the loop
                 print(
-                    "steps: {}/{}, avg score: {}".format(
+                    "steps: {}/{}, avg score per ep: {}".format(
                         steps * self.num_envs,
                         self.max_steps * self.num_envs,
-                        total_score,
+                        round(sum(self.rewards_deque) / self.num_eps, 3),
                     )
                 )
+                # print(f"Agent epsilon: {self.agent.epsilon}")
                 # reward_queue.append((steps, total_score))
 
                 with self.score_writer.as_default():
                     tf.summary.scalar(
-                        f"Avg Score per env over {self.prog_freq} steps",
-                        total_score,
+                        f"Avg Score Over {self.num_eps} Episodes",
+                        round(sum(self.rewards_deque) / self.num_eps, 3),
                         step=steps,
                     )
                     self.score_writer.flush()
@@ -293,24 +360,28 @@ class TrainAgent:
                 if predictions is not None:
                     with self.q_writer.as_default():
                         tf.summary.scalar(
-                            "mean_target_q_value", tf.reduce_mean(targets), step=steps
+                            "mean_target_q_value",
+                            tf.reduce_mean((tf.reduce_max(targets, axis=1))),
+                            step=steps,
                         )
                         tf.summary.scalar(
                             "std_target_q_value",
-                            tf.math.reduce_std(targets),
+                            tf.math.reduce_std((tf.reduce_max(targets, axis=1))),
                             step=steps,
                         )
                         tf.summary.scalar(
                             "mean_predicted_q_value",
-                            tf.reduce_mean(predictions),
+                            tf.reduce_mean((tf.reduce_max(predictions, axis=1))),
                             step=steps,
                         )
                         tf.summary.scalar(
                             "std_predicted_q_value",
-                            tf.math.reduce_std(predictions),
+                            tf.math.reduce_std((tf.reduce_max(predictions, axis=1))),
                             step=steps,
                         )
                         self.q_writer.flush()
+            if steps % self.video_freq == 0 and steps > 0:
+                self.record_video(steps)
             # self.agent.record_weights(steps)
             """
             if steps % self.save_rate == 0:
@@ -336,12 +407,13 @@ class TrainAgent:
         for e in range(self.num_eps):
             state, info = self.env.reset()
             # state = np.stack([state] * self.agent.frame_stack_size, axis=-1)
-
+            done = False
             for time in range(self.max_steps):
                 self.env.render()
 
                 action = self.agent.act(state)
-
+                if done is True:
+                    action = 1
                 next_state, _, done, _, _ = self.env.step(action)
                 """
                 next_state = np.concatenate(
@@ -353,6 +425,42 @@ class TrainAgent:
 
                 if done:
                     break
+
+    def record_video(self, steps):
+        prev_epsilon = self.agent.epsilon
+        self.agent.epsilon = 0.05
+        self.video_env.name_prefix = f"{steps}_"
+        for e in range(1):
+            state, _ = self.video_env.reset()
+
+            for step in range(10000):
+                action = self.agent.act(state)
+
+                next_state, _, done, _, _ = self.video_env.step(action)
+
+                state = next_state
+
+                if done:
+                    break
+        self.agent.epsilon = prev_epsilon
+        print(f"Agent epsilon: {self.agent.epsilon}")
+
+    def view_frames(self, frames):
+        # Create a directory to save the images
+        output_directory = f"models/{self.agent.model_name}/frames"
+        os.makedirs(output_directory, exist_ok=True)
+
+        # Iterate over the frames and save them as images
+        for i, frame in enumerate(frames):
+            # Ensure the frame is of the correct data type (uint8)
+            frame = frame.astype(np.uint8)
+
+            # Save the frame as an image
+            output_filename = f"frame_{i}.png"
+            output_path = os.path.join(output_directory, output_filename)
+            cv2.imwrite(output_path, frame)
+
+        print(f"Saved {len(frames)} frames as images in {output_directory}.")
 
 
 class CircularBuffer:
@@ -370,14 +478,13 @@ class CircularBuffer:
         self.action_space = action_space
         self.num_envs = num_envs
         self.states = np.empty((self.max_size, *frame_shape), dtype=np.uint8)
-        self.actions = np.empty((self.max_size), dtype=np.float32)
-        self.rewards = np.zeros((self.max_size), dtype=np.uint8)
+        self.actions = np.empty((self.max_size), dtype=np.float64)
+        self.rewards = np.zeros((self.max_size), dtype=np.float64)
         self.next_states = np.empty((self.max_size, *frame_shape), dtype=np.uint8)
         self.dones = np.empty((self.max_size), dtype=bool)
         self.position = 0
         self.current_size = 0
 
-    @profile
     def add_memory(self, states, actions, rewards, next_states, dones):
         size = states.shape[0]  # assuming the first dimension is the batch size
         if self.position + size <= self.max_size:
@@ -404,7 +511,6 @@ class CircularBuffer:
         self.position = (self.position + size) % self.max_size
         self.current_size = min(self.current_size + size, self.max_size)
 
-    @profile
     def sample_memory(self, batch_size):
         indices = np.random.choice(
             self.current_size, batch_size * self.num_envs, replace=True
