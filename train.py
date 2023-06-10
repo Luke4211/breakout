@@ -1,5 +1,6 @@
 from breakout import DQNAgent, TrainAgent
 import gymnasium as gym
+import shutil
 from gymnasium.wrappers import (
     AtariPreprocessing,
     FrameStack,
@@ -90,6 +91,7 @@ agent = DQNAgent(
     model_name=MODEL_NAME,
     decay_func=DECAY_FUNC,
     learning_rate=LEARNING_RATE,
+    num_envs=NUM_ENVS,
 )
 
 if LOAD_MODEL:
@@ -109,6 +111,8 @@ classroom = TrainAgent(
     video_env=video,
     video_freq=VIDEO_FREQ,
 )
+
+shutil.copy2("config.py", f"models/{MODEL_NAME}/")
 if PROFILE:
     lp = LineProfiler()
     lp_wrapper = lp(classroom.train)

@@ -98,9 +98,9 @@ class DQNAgent:
         model.add(Dense(self.action_space, activation="linear"))
         model.compile(
             loss="mse",
-            optimizer=Adam(learning_rate=self.learning_rate),
+            optimizer=RMSprop(learning_rate=self.learning_rate),
             run_eagerly=False,
-            jit_compile=True,
+            jit_compile=False,
         )
         return model
 
@@ -149,12 +149,12 @@ class DQNAgent:
 
         return np.argmax(act_values[0])  # returns action
 
-    @tf.function(jit_compile=True)
-    def act_on_batch(self, states, batch_size):
-        states = tf.cast(states, dtype=tf.float32) / 255.0
+    # @tf.function(reduce_retracing=True)
+    def act_on_batch(self, states, batch_size, epsilon):
+        # states = tf.cast(states, dtype=tf.float32) / 255.0
         rand_values = -tf.ones(batch_size, dtype=tf.float32)
         random_positions = (
-            tf.random.uniform(shape=(batch_size,), minval=0, maxval=1) <= self.epsilon
+            tf.random.uniform(shape=(batch_size,), minval=0, maxval=1) <= epsilon
         )
 
         random_integers = tf.random.uniform(
@@ -175,32 +175,22 @@ class DQNAgent:
 
         return tf.cast(pred_values, dtype=np.uint8)
 
+    # @tf.function(jit_compile=True)
     @tf.function(jit_compile=True)
-    def replay(self, num_env):
+    def replay(self, actions, states, rewards, next_states, dones):
         # if self.memory.get_size() < self.batch_size * num_env:
         #    return None, None
 
-        states, actions, rewards, next_states, dones = self.memory.sample_memory(
-            self.batch_size
-        )
-        # minibatch = random.sample(self.memory, self.batch_size * num_env)
         actual_batch_size = len(states)
 
-        states = tf.convert_to_tensor(states, dtype=tf.float32) / 255.0
-        next_states = tf.convert_to_tensor(next_states, dtype=tf.float32) / 255.0
         targets = rewards + self.gamma * (
             tf.reduce_max(self.target_model(next_states), axis=1)
         ) * (1 - dones)
         targets_full = self.model(states)
 
-        # ind = np.array([i for i in range(actual_batch_size)])
-        ind = tf.range(actual_batch_size, dtype=tf.int64)
-        # targets_full[[ind], [actions]] = targets
+        ind = tf.range(actual_batch_size, dtype=tf.int32)
         indices = tf.stack([ind, actions], axis=-1)
         targets_full = tf.tensor_scatter_nd_update(targets_full, indices, targets)
-        # x_train = tf.convert_to_tensor(states)
-        # y_train = tf.convert_to_tensor(targets_full)
-        # self.model.fit(x_train, y_train, epochs=1, verbose=0)
         with tf.GradientTape() as tape:
             predictions = self.model(states)
             loss = tf.keras.losses.MSE(targets_full, predictions)
@@ -223,10 +213,12 @@ class DQNAgent:
                     tf.summary.histogram(f"Layer_{i}_Weight_{j}", weight, step=steps)
 
     def save(self, name):
-        self.model.save(f"models/{self.model_name}/{name}")
+        self.model.save(f"models/{self.model_name}/checkpoints/{name}")
 
     def load(self, name):
-        self.model = tf.keras.models.load_model(f"models/{self.model_name}/{name}")
+        self.model = tf.keras.models.load_model(
+            f"models/{self.model_name}/checkpoints/{name}"
+        )
 
     def load_other(self, name):
         self.model = tf.keras.models.load_model(f"models/{name}")
@@ -297,8 +289,12 @@ class TrainAgent:
         death_indices = []
         for steps in range(self.max_steps):
             # Decide action
-
-            actions = self.agent.act_on_batch(states, self.num_envs)
+            # states =
+            actions = self.agent.act_on_batch(
+                tf.convert_to_tensor(states, dtype=tf.float32) / 255.0,
+                self.num_envs,
+                self.agent.epsilon,
+            )
             # actions = np.array([self.agent.act(states[0])])
             actions = actions.numpy()
 
@@ -320,14 +316,29 @@ class TrainAgent:
             dones = np.array(dones)
             dones[death_indices] = True
             rewards[dones] = self.neg_reward
-            rewards = tf.convert_to_tensor(rewards, dtype=tf.uint8)
             self.agent.remember(states, actions, rewards, next_states, dones)
             self.agent.decay_epsilon()
             # make next_state the new current state for the next frame.
             states = next_states
 
             if self.agent.memory.get_size() >= self.min_sample_size:
-                predictions, targets = self.agent.replay(self.num_envs)
+                (
+                    m_states,
+                    m_actions,
+                    m_rewards,
+                    m_next_states,
+                    m_dones,
+                ) = self.agent.memory.sample_memory(self.agent.batch_size)
+                m_states = tf.convert_to_tensor(m_states, dtype=tf.float32) / 255.0
+                m_actions = tf.convert_to_tensor(m_actions, dtype=tf.int32)
+                m_rewards = tf.convert_to_tensor(m_rewards, dtype=tf.float32)
+                m_next_states = (
+                    tf.convert_to_tensor(m_next_states, dtype=tf.float32) / 255.0
+                )
+                m_dones = tf.convert_to_tensor(m_dones, dtype=tf.float32)
+                predictions, targets = self.agent.replay(
+                    m_actions, m_states, m_rewards, m_next_states, m_dones
+                )
                 predictions = predictions.numpy()
                 targets = targets.numpy()
             else:
@@ -382,24 +393,10 @@ class TrainAgent:
                         )
                         self.q_writer.flush()
             if steps % self.video_freq == 0 and steps > 0:
-                self.record_video(steps)
+                # self.record_video(steps, min_epsilon=False)
+                # self.record_video(steps, min_epsilon=True)
+                self.agent.save(f"{steps}_steps.h5")
             # self.agent.record_weights(steps)
-            """
-            if steps % self.save_rate == 0:
-                if os.path.exists(f"models/{self.agent.model_name}/avg_rewards.pkl"):
-                    with open(
-                        f"models/{self.agent.model_name}/avg_rewards.pkl", "rb"
-                    ) as file:
-                        existing_data = pickle.load(file)
-                else:
-                    existing_data = []
-                existing_data.extend(reward_queue)
-                with open(
-                    f"models/{self.agent.model_name}/avg_rewards.pkl", "wb"
-                ) as file:
-                    pickle.dump(existing_data, file)
-                reward_queue = []
-                """
 
         # Save the model after training
         self.agent.save(f"models/{self.agent.model_name}/final_model.h5")
@@ -416,33 +413,37 @@ class TrainAgent:
                 if done is True:
                     action = 1
                 next_state, _, done, _, _ = self.env.step(action)
-                """
-                next_state = np.concatenate(
-                    (state[..., 1:], np.expand_dims(next_state, -1)), axis=-1
-                )
-                """
 
                 state = next_state
 
                 if done:
                     break
 
-    def record_video(self, steps):
+    def record_video(self, steps, min_epsilon):
         prev_epsilon = self.agent.epsilon
-        self.agent.epsilon = 0.05
-        self.video_env.name_prefix = f"{steps}_"
+        name_flag = "reg"
+        if min_epsilon:
+            self.agent.epsilon = 0.05
+            name_flag = "min"
+        self.video_env.name_prefix = f"{steps}_{name_flag}_"
+        done = True
         for e in range(1):
             state, _ = self.video_env.reset()
-
+            lives = 5
             for step in range(10000):
                 action = self.agent.act(state)
-
-                next_state, _, done, _, _ = self.video_env.step(action)
+                if done:
+                    action = 1
+                next_state, _, done, _, info = self.video_env.step(action)
+                if info["lives"] < lives:
+                    done = True
+                    lives = info["lives"]
 
                 state = next_state
 
-                if done:
+                if lives == 0:
                     break
+
         self.agent.epsilon = prev_epsilon
         print(f"Agent epsilon: {self.agent.epsilon}")
 
@@ -478,65 +479,49 @@ class CircularBuffer:
         self.stack_size = stack_size
         self.action_space = action_space
         self.num_envs = num_envs
-
-        self.states = tf.TensorArray(
-            dtype=tf.uint8,
-            size=self.max_size,
-            dynamic_size=False,
-            clear_after_read=False,
-        )
-        self.actions = tf.TensorArray(
-            dtype=tf.uint8,
-            size=self.max_size,
-            dynamic_size=False,
-            clear_after_read=False,
-        )
-        self.rewards = tf.TensorArray(
-            dtype=tf.uint8,
-            size=self.max_size,
-            dynamic_size=False,
-            clear_after_read=False,
-        )
-        self.next_states = tf.TensorArray(
-            dtype=tf.uint8,
-            size=self.max_size,
-            dynamic_size=False,
-            clear_after_read=False,
-        )
-        self.dones = tf.TensorArray(
-            dtype=tf.bool,
-            size=self.max_size,
-            dynamic_size=False,
-            clear_after_read=False,
-        )
-
+        self.states = np.empty((self.max_size, *frame_shape), dtype=np.uint8)
+        self.actions = np.empty((self.max_size), dtype=np.float64)
+        self.rewards = np.zeros((self.max_size), dtype=np.float64)
+        self.next_states = np.empty((self.max_size, *frame_shape), dtype=np.uint8)
+        self.dones = np.empty((self.max_size), dtype=bool)
         self.position = 0
         self.current_size = 0
 
     def add_memory(self, states, actions, rewards, next_states, dones):
-        size = states.shape[0]
-        indices = (
-            tf.range(start=self.position, limit=self.position + size) % self.max_size
-        )
-
-        self.states = self.states.scatter(indices, states)
-        self.actions = self.actions.scatter(indices, actions)
-        self.rewards = self.rewards.scatter(indices, rewards)
-        self.next_states = self.next_states.scatter(indices, next_states)
-        self.dones = self.dones.scatter(indices, dones)
-
+        size = states.shape[0]  # assuming the first dimension is the batch size
+        if self.position + size <= self.max_size:
+            # there's enough space at the end of the buffer
+            self.states[self.position : self.position + size] = states
+            self.actions[self.position : self.position + size] = actions
+            self.rewards[self.position : self.position + size] = rewards
+            self.next_states[self.position : self.position + size] = next_states
+            self.dones[self.position : self.position + size] = dones
+        else:
+            # the batch spans the end and the beginning of the buffer
+            # split the batch and add it in two parts
+            split = self.max_size - self.position
+            self.states[self.position :] = states[:split]
+            self.actions[self.position :] = actions[:split]
+            self.rewards[self.position :] = rewards[:split]
+            self.next_states[self.position :] = next_states[:split]
+            self.dones[self.position :] = dones[:split]
+            self.states[: size - split] = states[split:]
+            self.actions[: size - split] = actions[split:]
+            self.rewards[: size - split] = rewards[split:]
+            self.next_states[: size - split] = next_states[split:]
+            self.dones[: size - split] = dones[split:]
         self.position = (self.position + size) % self.max_size
         self.current_size = min(self.current_size + size, self.max_size)
 
     def sample_memory(self, batch_size):
-        indices = tf.random.uniform(
-            (batch_size * self.num_envs,), 0, self.current_size, dtype=tf.int32
+        indices = np.random.choice(
+            self.current_size, batch_size * self.num_envs, replace=False
         )
-        states = self.states.gather(indices)
-        actions = self.actions.gather(indices)
-        rewards = self.rewards.gather(indices)
-        next_states = self.next_states.gather(indices)
-        dones = self.dones.gather(indices)
+        states = self.states[indices]
+        actions = self.actions[indices]
+        rewards = self.rewards[indices]
+        next_states = self.next_states[indices]
+        dones = self.dones[indices]
 
         return states, actions, rewards, next_states, dones
 

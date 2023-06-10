@@ -12,7 +12,7 @@ print(env.observation_space)
 agent = DQNAgent(
     env.observation_space.shape,
     env.action_space.n,
-    batch_size=64,
+    batch_size=32,
     model_name=MODEL_NAME,
 )
 
