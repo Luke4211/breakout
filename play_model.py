@@ -21,7 +21,7 @@ classroom = TrainAgent(env, agent, num_envs=1)
 # classroom.train()
 
 agent.load("interrupted_model.h5")
-agent.epsilon = 0.1
+agent.epsilon = 0.01
 agent.update_target_model()
 
 classroom.play_model()

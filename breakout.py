@@ -98,7 +98,7 @@ class DQNAgent:
         model.add(Dense(self.action_space, activation="linear"))
         model.compile(
             loss="mse",
-            optimizer=RMSprop(learning_rate=self.learning_rate),
+            optimizer=Adam(learning_rate=self.learning_rate, clipnorm=1.0),
             run_eagerly=False,
             jit_compile=False,
         )
@@ -419,7 +419,7 @@ class TrainAgent:
                 if done:
                     break
 
-    def record_video(self, steps, min_epsilon):
+    def record_video(self, steps, min_epsilon, eps=1, length=50000):
         prev_epsilon = self.agent.epsilon
         name_flag = "reg"
         if min_epsilon:
@@ -427,10 +427,10 @@ class TrainAgent:
             name_flag = "min"
         self.video_env.name_prefix = f"{steps}_{name_flag}_"
         done = True
-        for e in range(1):
+        for e in range(eps):
             state, _ = self.video_env.reset()
             lives = 5
-            for step in range(10000):
+            for step in range(length):
                 action = self.agent.act(state)
                 if done:
                     action = 1

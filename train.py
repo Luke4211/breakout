@@ -32,6 +32,7 @@ from config import (
     MIN_SAMPLE_SIZE,
     VIDEO_FREQ,
     STICKY_ACTION_PROBABILITY,
+    RECORD_VIDEO,
 )
 
 
@@ -112,12 +113,17 @@ classroom = TrainAgent(
     video_freq=VIDEO_FREQ,
 )
 
-shutil.copy2("config.py", f"models/{MODEL_NAME}/")
+
 if PROFILE:
     lp = LineProfiler()
     lp_wrapper = lp(classroom.train)
     lp_wrapper()
 
     lp.print_stats()
+elif RECORD_VIDEO:
+    classroom.agent.epsilon = 0.01
+    classroom.agent.load("interrupted_model.h5")
+    classroom.record_video(0, False, eps=50, length=2000000)
 else:
+    shutil.copy2("config.py", f"models/{MODEL_NAME}/")
     classroom.train()
